@@ -24,6 +24,7 @@ from oslo_concurrency import processutils
 from oslo_config import cfg
 from oslo_log import log
 from oslo_utils import netutils
+from oslo_serialization import jsonutils
 import pkg_resources
 from six.moves.urllib import parse as urlparse
 from stevedore import extension
@@ -368,6 +369,25 @@ class IronicPythonAgent(base.ExecuteCommandMixin):
             else:
                 LOG.error('Neither ipa-api-url nor inspection_callback_url'
                           'found, please check your pxe append parameters.')
+
+        if cfg.CONF.init_clean_steps:
+            clean_steps = sorted(jsonutils.loads(cfg.CONF.init_clean_steps), key=lambda k: k['priority'], reverse=True)
+            for step in clean_steps:
+                LOG.debug('Executing clean step %s', step)
+                if 'step' not in step:
+                    LOG.error('Malformed clean_step, no "step" key: %s' % step)
+                    continue
+
+                try:
+                    result = hardware.dispatch_to_managers(step['step'], self.node, [])
+                except Exception as e:
+                    msg = ('Error performing clean_step %(step)s: %(err)s' %
+                           {'step': step['step'], 'err': e})
+                    LOG.exception(msg)
+                    raise errors.CleaningError(msg)
+                LOG.info('Clean step completed: %(step)s, result: %(result)s',
+                     {'step': step, 'result': result})
+
 
         if netutils.is_ipv6_enabled():
             # Listens to both IP versions, assuming IPV6_V6ONLY isn't enabled,

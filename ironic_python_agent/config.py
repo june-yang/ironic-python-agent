@@ -201,6 +201,9 @@ cli_opts = [
                     'Must be provided together with "certfile" option. '
                     'Default is to not present any client certificates to '
                     'the server.'),
+    cfg.StrOpt('init_clean_steps',
+               default=APARAMS.get('init-clean-steps', None),
+               help='Steps to clean node after ramdisk and ipa load complete. ')
 ]
 
 CONF.register_cli_opts(cli_opts)
