@@ -22,7 +22,8 @@ _build
 doc/source/api/
 doc/build
 .proxy.sh.save
-
+ironic_python_agent/.pydevproject
+ironic_python_agent/.project
 # release notes build
 releasenotes/build
 

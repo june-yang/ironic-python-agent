@@ -137,6 +137,23 @@ BLK_DEVICE_TEMPLATE = (
     'KNAME="loop0" MODEL="" SIZE="109109248" ROTA="1" TYPE="loop"'
 )
 
+BLK_REMOTE_DEVICE_TEMPLATE = (
+    'KNAME="sda" MODEL="TinyUSB Drive" SIZE="3116853504" '
+    'ROTA="0" TYPE="disk" SERIAL="123" TRAN=""\n'
+    'KNAME="sdb" MODEL="Fastable SD131 7" SIZE="10737418240" '
+    'ROTA="0" TYPE="disk" TRAN=""\n'
+    'KNAME="sdc" MODEL="NWD-BLP4-1600   " SIZE="1765517033472" '
+    ' ROTA="0" TYPE="disk" TRAN=""\n'
+    'KNAME="sdd" MODEL="NWD-BLP4-1600   " SIZE="1765517033472" '
+    ' ROTA="0" TYPE="disk" TRAN=""\n'
+    'KNAME="sde" MODEL="OPEN-V          " SIZE="10737418240" '
+    ' ROTA="0" TYPE="disk" TRAN="fc"\n'
+    'KNAME="sdf" MODEL="IBLOCK          " SIZE="107374182400" '
+    ' ROTA="0" TYPE="disk" TRAN="iscsi"\n'
+    'KNAME="loop0" MODEL="" SIZE="109109248" ROTA="1" TYPE="loop" '
+    'TRAN=""'
+)
+
 # NOTE(pas-ha) largest device is 1 byte smaller than 4GiB
 BLK_DEVICE_TEMPLATE_SMALL = (
     'KNAME="sda" MODEL="TinyUSB Drive" SIZE="3116853504" '
@@ -144,6 +161,15 @@ BLK_DEVICE_TEMPLATE_SMALL = (
     'KNAME="sdb" MODEL="AlmostBigEnough Drive" SIZE="4294967295" '
     'ROTA="0" TYPE="disk"'
 )
+
+# NOTE(pas-ha) largest device is 1 byte smaller than 4GiB
+BLK_REMOTE_DEVICE_TEMPLATE_SMALL = (
+    'KNAME="sda" MODEL="TinyUSB Drive" SIZE="3116853504" '
+    'ROTA="0" TYPE="disk" TRAN=""\n'
+    'KNAME="sdb" MODEL="AlmostBigEnough Drive" SIZE="4294967295" '
+    'ROTA="0" TYPE="disk" TRAN=""'
+)
+
 BLK_DEVICE_TEMPLATE_SMALL_DEVICES = [
     hardware.BlockDevice(name='/dev/sda', model='TinyUSB Drive',
                          size=3116853504, rotational=False,
@@ -540,10 +566,10 @@ class TestGenericHardwareManager(test_base.BaseTestCase):
     @mock.patch.object(utils, 'execute')
     def test_get_os_install_device(self, mocked_execute, mock_cached_node):
         mock_cached_node.return_value = None
-        mocked_execute.return_value = (BLK_DEVICE_TEMPLATE, '')
+        mocked_execute.return_value = (BLK_REMOTE_DEVICE_TEMPLATE, '')
         self.assertEqual('/dev/sdb', self.hardware.get_os_install_device())
         mocked_execute.assert_called_once_with(
-            'lsblk', '-Pbdi', '-oKNAME,MODEL,SIZE,ROTA,TYPE',
+            'lsblk', '-Pbdi', '-oKNAME,MODEL,SIZE,ROTA,TYPE,TRAN',
             check_exit_code=[0])
         mock_cached_node.assert_called_once_with()
 
@@ -553,14 +579,60 @@ class TestGenericHardwareManager(test_base.BaseTestCase):
                                          mock_cached_node):
         """Fail to find device >=4GB w/o root device hints"""
         mock_cached_node.return_value = None
-        mocked_execute.return_value = (BLK_DEVICE_TEMPLATE_SMALL, '')
+        mocked_execute.return_value = (BLK_REMOTE_DEVICE_TEMPLATE_SMALL, '')
         ex = self.assertRaises(errors.DeviceNotFound,
                                self.hardware.get_os_install_device)
         mocked_execute.assert_called_once_with(
-            'lsblk', '-Pbdi', '-oKNAME,MODEL,SIZE,ROTA,TYPE',
+            'lsblk', '-Pbdi', '-oKNAME,MODEL,SIZE,ROTA,TYPE,TRAN',
             check_exit_code=[0])
         self.assertIn(str(4 * units.Gi), ex.details)
         mock_cached_node.assert_called_once_with()
+
+    @mock.patch.object(hardware, 'list_part_block_devices')
+    @mock.patch.object(hardware, 'get_cached_node')
+    def _get_os_install_device_root_device_size(self, tran_type,
+                                                min_size, expected_device,
+                                                mock_cached_node, mock_dev):
+        mock_cached_node.return_value = {'properties':
+                                         {'root_device_type': tran_type,
+                                          'root_device_min_size': min_size}}
+        model = 'fastable sd131 7'
+        mock_dev.return_value = [
+            hardware.BlockDevice(name='/dev/sda',
+                                 model='TinyUSB Drive',
+                                 size=3116853504,
+                                 rotational=False,
+                                 vendor='Super Vendor',
+                                 wwn='wwn0',
+                                 wwn_with_extension='wwn0ven0',
+                                 wwn_vendor_extension='ven0',
+                                 serial='serial0'),
+            hardware.BlockDevice(name='/dev/sdb',
+                                 model=model,
+                                 size=10737418240,
+                                 rotational=True,
+                                 vendor='fake-vendor',
+                                 wwn='fake-wwn',
+                                 wwn_with_extension='fake-wwnven0',
+                                 wwn_vendor_extension='ven0',
+                                 serial='fake-serial'),
+        ]
+
+        self.assertEqual(expected_device,
+                         self.hardware.get_os_install_device())
+        mock_cached_node.assert_called_once_with()
+        mock_dev.assert_called_once_with('disk', 'local')
+
+    def test_get_os_install_device_root_device_min_size(self):
+        self._get_os_install_device_root_device_size('local', 2, '/dev/sda')
+
+    def test_get_os_install_device_root_device_min_size_str(self):
+        self._get_os_install_device_root_device_size('local', '2', '/dev/sda')
+
+    def test_get_os_install_device_root_device_min_size_not_int(self):
+        self._get_os_install_device_root_device_size('local',
+                                                     'not-int',
+                                                     '/dev/sdb')
 
     @mock.patch.object(hardware, 'list_all_block_devices')
     @mock.patch.object(hardware, 'get_cached_node')
@@ -851,6 +923,205 @@ class TestGenericHardwareManager(test_base.BaseTestCase):
                                  getattr(device, attr))
         expected_calls = [mock.call('/sys/block/%s/device/scsi_device' % dev)
                           for dev in ('sda', 'sdb', 'sdc', 'sdd')]
+        mock_listdir.assert_has_calls(expected_calls)
+
+    @mock.patch.object(os, 'listdir')
+    @mock.patch.object(hardware, '_get_device_info')
+    @mock.patch.object(pyudev.Device, 'from_device_file')
+    @mock.patch.object(utils, 'execute')
+    def test_list_part_block_device_local(self, mocked_execute, mocked_udev,
+                                          mocked_dev_vendor, mock_listdir):
+        mock_listdir.return_value = ['1:0:0:0']
+        mocked_execute.return_value = (BLK_REMOTE_DEVICE_TEMPLATE, '')
+        mocked_udev.side_effect = pyudev.DeviceNotFoundError()
+        mocked_dev_vendor.return_value = 'Super Vendor'
+        devices = hardware.list_part_block_devices()
+        expected_devices = [
+            hardware.BlockDevice(name='/dev/sda',
+                                 model='TinyUSB Drive',
+                                 size=3116853504,
+                                 rotational=False,
+                                 vendor='Super Vendor',
+                                 hctl='1:0:0:0'),
+            hardware.BlockDevice(name='/dev/sdb',
+                                 model='Fastable SD131 7',
+                                 size=10737418240,
+                                 rotational=False,
+                                 vendor='Super Vendor',
+                                 hctl='1:0:0:0'),
+            hardware.BlockDevice(name='/dev/sdc',
+                                 model='NWD-BLP4-1600',
+                                 size=1765517033472,
+                                 rotational=False,
+                                 vendor='Super Vendor',
+                                 hctl='1:0:0:0'),
+            hardware.BlockDevice(name='/dev/sdd',
+                                 model='NWD-BLP4-1600',
+                                 size=1765517033472,
+                                 rotational=False,
+                                 vendor='Super Vendor',
+                                 hctl='1:0:0:0'),
+        ]
+
+        self.assertEqual(4, len(devices))
+        for expected, device in zip(expected_devices, devices):
+            # Compare all attrs of the objects
+            for attr in ['name', 'model', 'size', 'rotational',
+                         'wwn', 'vendor', 'serial', 'hctl']:
+                self.assertEqual(getattr(expected, attr),
+                                 getattr(device, attr))
+        expected_calls = [mock.call('/sys/block/%s/device/scsi_device' % dev)
+                          for dev in ('sda', 'sdb', 'sdc', 'sdd')]
+        mock_listdir.assert_has_calls(expected_calls)
+
+    @mock.patch.object(os, 'listdir')
+    @mock.patch.object(hardware, '_get_device_info')
+    @mock.patch.object(pyudev.Device, 'from_device_file')
+    @mock.patch.object(utils, 'execute')
+    def test_list_part_block_device_wrong_tran_type(self, mocked_execute,
+                                                    mocked_udev,
+                                                    mocked_dev_vendor,
+                                                    mock_listdir):
+        mock_listdir.return_value = ['1:0:0:0']
+        mocked_execute.return_value = (BLK_REMOTE_DEVICE_TEMPLATE, '')
+        mocked_udev.side_effect = pyudev.DeviceNotFoundError()
+        mocked_dev_vendor.return_value = 'Super Vendor'
+        devices = hardware.list_part_block_devices(tran_type='ata')
+        expected_devices = [
+            hardware.BlockDevice(name='/dev/sda',
+                                 model='TinyUSB Drive',
+                                 size=3116853504,
+                                 rotational=False,
+                                 vendor='Super Vendor',
+                                 hctl='1:0:0:0'),
+            hardware.BlockDevice(name='/dev/sdb',
+                                 model='Fastable SD131 7',
+                                 size=10737418240,
+                                 rotational=False,
+                                 vendor='Super Vendor',
+                                 hctl='1:0:0:0'),
+            hardware.BlockDevice(name='/dev/sdc',
+                                 model='NWD-BLP4-1600',
+                                 size=1765517033472,
+                                 rotational=False,
+                                 vendor='Super Vendor',
+                                 hctl='1:0:0:0'),
+            hardware.BlockDevice(name='/dev/sdd',
+                                 model='NWD-BLP4-1600',
+                                 size=1765517033472,
+                                 rotational=False,
+                                 vendor='Super Vendor',
+                                 hctl='1:0:0:0'),
+        ]
+
+        self.assertEqual(4, len(devices))
+        for expected, device in zip(expected_devices, devices):
+            # Compare all attrs of the objects
+            for attr in ['name', 'model', 'size', 'rotational',
+                         'wwn', 'vendor', 'serial', 'hctl']:
+                self.assertEqual(getattr(expected, attr),
+                                 getattr(device, attr))
+        expected_calls = [mock.call('/sys/block/%s/device/scsi_device' % dev)
+                          for dev in ('sda', 'sdb', 'sdc', 'sdd')]
+        mock_listdir.assert_has_calls(expected_calls)
+
+    @mock.patch.object(os, 'listdir')
+    @mock.patch.object(hardware, '_get_device_info')
+    @mock.patch.object(pyudev.Device, 'from_device_file')
+    @mock.patch.object(utils, 'execute')
+    def test_list_part_block_device_iscsi(self, mocked_execute, mocked_udev,
+                                          mocked_dev_vendor, mock_listdir):
+        mock_listdir.return_value = ['1:0:0:0']
+        mocked_execute.return_value = (BLK_REMOTE_DEVICE_TEMPLATE, '')
+        mocked_udev.side_effect = pyudev.DeviceNotFoundError()
+        mocked_dev_vendor.return_value = 'Super Vendor'
+        devices = hardware.list_part_block_devices(tran_type='iscsi')
+        expected_devices = [
+            hardware.BlockDevice(name='/dev/sdf',
+                                 model='IBLOCK',
+                                 size=107374182400,
+                                 rotational=False,
+                                 vendor='Super Vendor',
+                                 hctl='1:0:0:0'),
+        ]
+
+        self.assertEqual(1, len(devices))
+        for expected, device in zip(expected_devices, devices):
+            # Compare all attrs of the objects
+            for attr in ['name', 'model', 'size', 'rotational',
+                         'wwn', 'vendor', 'serial', 'hctl']:
+                self.assertEqual(getattr(expected, attr),
+                                 getattr(device, attr))
+        expected_calls = [mock.call('/sys/block/%s/device/scsi_device' % dev)
+                          for dev in ('sdf',)]
+        mock_listdir.assert_has_calls(expected_calls)
+
+    @mock.patch.object(os, 'listdir')
+    @mock.patch.object(hardware, '_get_device_info')
+    @mock.patch.object(pyudev.Device, 'from_device_file')
+    @mock.patch.object(utils, 'execute')
+    def test_list_part_block_device_fc(self, mocked_execute, mocked_udev,
+                                       mocked_dev_vendor, mock_listdir):
+        mock_listdir.return_value = ['1:0:0:0']
+        mocked_execute.return_value = (BLK_REMOTE_DEVICE_TEMPLATE, '')
+        mocked_udev.side_effect = pyudev.DeviceNotFoundError()
+        mocked_dev_vendor.return_value = 'Super Vendor'
+        devices = hardware.list_part_block_devices(tran_type='fc')
+        expected_devices = [
+            hardware.BlockDevice(name='/dev/sde',
+                                 model='OPEN-V',
+                                 size=10737418240,
+                                 rotational=False,
+                                 vendor='Super Vendor',
+                                 hctl='1:0:0:0'),
+        ]
+
+        self.assertEqual(1, len(devices))
+        for expected, device in zip(expected_devices, devices):
+            # Compare all attrs of the objects
+            for attr in ['name', 'model', 'size', 'rotational',
+                         'wwn', 'vendor', 'serial', 'hctl']:
+                self.assertEqual(getattr(expected, attr),
+                                 getattr(device, attr))
+        expected_calls = [mock.call('/sys/block/%s/device/scsi_device' % dev)
+                          for dev in ('sde',)]
+        mock_listdir.assert_has_calls(expected_calls)
+
+    @mock.patch.object(os, 'listdir')
+    @mock.patch.object(hardware, '_get_device_info')
+    @mock.patch.object(pyudev.Device, 'from_device_file')
+    @mock.patch.object(utils, 'execute')
+    def test_list_part_block_device_remote(self, mocked_execute, mocked_udev,
+                                           mocked_dev_vendor, mock_listdir):
+        mock_listdir.return_value = ['1:0:0:0']
+        mocked_execute.return_value = (BLK_REMOTE_DEVICE_TEMPLATE, '')
+        mocked_udev.side_effect = pyudev.DeviceNotFoundError()
+        mocked_dev_vendor.return_value = 'Super Vendor'
+        devices = hardware.list_part_block_devices(tran_type='remote')
+        expected_devices = [
+            hardware.BlockDevice(name='/dev/sde',
+                                 model='OPEN-V',
+                                 size=10737418240,
+                                 rotational=False,
+                                 vendor='Super Vendor',
+                                 hctl='1:0:0:0'),
+            hardware.BlockDevice(name='/dev/sdf',
+                                 model='IBLOCK',
+                                 size=107374182400,
+                                 rotational=False,
+                                 vendor='Super Vendor',
+                                 hctl='1:0:0:0'),
+        ]
+
+        self.assertEqual(2, len(devices))
+        for expected, device in zip(expected_devices, devices):
+            # Compare all attrs of the objects
+            for attr in ['name', 'model', 'size', 'rotational',
+                         'wwn', 'vendor', 'serial', 'hctl']:
+                self.assertEqual(getattr(expected, attr),
+                                 getattr(device, attr))
+        expected_calls = [mock.call('/sys/block/%s/device/scsi_device' % dev)
+                          for dev in ('sde', 'sdf')]
         mock_listdir.assert_has_calls(expected_calls)
 
     @mock.patch.object(hardware, '_get_device_info')
