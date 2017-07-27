@@ -218,10 +218,11 @@ class BlockDevice(encoding.SerializableComparable):
 class NetworkInterface(encoding.SerializableComparable):
     serializable_fields = ('name', 'mac_address', 'ipv4_address',
                            'has_carrier', 'lldp', 'vendor', 'product',
-                           'client_id')
+                           'client_id', 'speed', 'port', 'bus')
 
     def __init__(self, name, mac_addr, ipv4_address=None, has_carrier=True,
-                 lldp=None, vendor=None, product=None, client_id=None):
+                 lldp=None, vendor=None, product=None, speed=None, port=None,
+                 bus=None, client_id=None):
         self.name = name
         self.mac_address = mac_addr
         self.ipv4_address = ipv4_address
@@ -233,6 +234,10 @@ class NetworkInterface(encoding.SerializableComparable):
         # client identifier Option to allow DHCP to work over InfiniBand.
         # see https://tools.ietf.org/html/rfc4390
         self.client_id = client_id
+        # NOTE(yaojun), expand new fileds
+        self.speed = speed
+        self.port = port
+        self.bus = bus
 
 
 class CPU(encoding.SerializableComparable):
@@ -526,12 +531,44 @@ class GenericHardwareManager(HardwareManager):
         with open(addr_path) as addr_file:
             mac_addr = addr_file.read().strip()
 
+        # NOTE: Added by yaojun, to support get speed
+        speed_path = '{0}/class/net/{1}/speed'.format(self.sys_path,
+                                                      interface_name)
+        speed = '0'
+        # Note: wireless interface doesn't support read */speed file
+        # it reports 'Invalid argument' error
+        if interface_name != 'wlan0':
+            with open(speed_path) as speed_file:
+                speed = speed_file.read().strip()
+        try:
+            xport = utils.execute('/bin/tiny-ethtool', '--show-port',
+                                  interface_name)
+            port = xport[0].split('\n')[0]
+        except processutils.ProcessExecutionError as e:
+            error_msg = ('Unable to execute tiny-ethtool %(dev)s '
+                         'failed with %(err)s.' %
+                         {'dev': interface_name, 'err': e})
+            LOG.error(error_msg)
+            raise errors.CommandExecutionError(error_msg)
+
+        try:
+            xbus = utils.execute('/bin/tiny-ethtool', '--show-bus',
+                                 interface_name)
+            bus = xbus[0].split('\n')[0]
+        except processutils.ProcessExecutionError as e:
+            error_msg = ('Unable to execute tiny-ethtool %(dev)s '
+                         'failed with %(err)s.' %
+                         {'dev': interface_name, 'err': e})
+            LOG.error(error_msg)
+            raise errors.CommandExecutionError(error_msg)
+
         return NetworkInterface(
             interface_name, mac_addr,
             ipv4_address=self.get_ipv4_addr(interface_name),
             has_carrier=netutils.interface_has_carrier(interface_name),
             vendor=_get_device_info(interface_name, 'net', 'vendor'),
-            product=_get_device_info(interface_name, 'net', 'device'))
+            product=_get_device_info(interface_name, 'net', 'device'),
+            speed=speed, bus=bus, port=port)
 
     def get_ipv4_addr(self, interface_id):
         return netutils.get_ipv4_addr(interface_id)
