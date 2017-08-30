@@ -27,9 +27,11 @@ from ironic_lib import utils as ironic_utils
 import mock
 from oslo_concurrency import processutils
 from oslo_serialization import base64
+from oslo_utils import units
 from oslotest import base as test_base
 
 from ironic_python_agent import errors
+from ironic_python_agent import hardware
 from ironic_python_agent import utils
 
 
@@ -346,6 +348,76 @@ class TestFailures(testtools.TestCase):
 
 
 class TestUtils(testtools.TestCase):
+
+    def _test_guess_root_disk(self, size=8, device_name='/dev/vda'):
+        devices = [
+            hardware.BlockDevice(name='/dev/sdd',
+                                 model='NWD-BLP4-1600',
+                                 size=207374182400,
+                                 rotational=False,
+                                 vendor='Super Vendor',
+                                 hctl='1:0:0:0'),
+            hardware.BlockDevice(name='/dev/sda',
+                                 model='TinyUSB Drive',
+                                 size=3116853504,
+                                 rotational=False,
+                                 vendor='Super Vendor',
+                                 hctl='1:0:0:0'),
+            hardware.BlockDevice(name='/dev/sdc',
+                                 model='NWD-BLP4-1600',
+                                 size=107374182400,
+                                 rotational=False,
+                                 vendor='Super Vendor',
+                                 hctl='1:0:0:0'),
+            hardware.BlockDevice(name='/dev/sdb',
+                                 model='Fastable SD131 7',
+                                 size=107374182400,
+                                 rotational=False,
+                                 vendor='Super Vendor',
+                                 hctl='1:0:0:0'),
+        ]
+        require_device_name = device_name
+        device = utils.guess_root_disk(devices, size * units.Gi)
+        self.assertEqual(device.name, require_device_name)
+
+    def test_guess_root_disk_small(self):
+        expect_device_name = '/dev/sdc'
+        self._test_guess_root_disk(100, expect_device_name)
+
+    def test_guess_root_disk_bigger(self):
+        expect_device_name = '/dev/sdd'
+        self._test_guess_root_disk(150, expect_device_name)
+
+    def test_guess_root_disk_to_big(self):
+        devices = [
+            hardware.BlockDevice(name='/dev/sdd',
+                                 model='NWD-BLP4-1600',
+                                 size=207374182400,
+                                 rotational=False,
+                                 vendor='Super Vendor',
+                                 hctl='1:0:0:0'),
+            hardware.BlockDevice(name='/dev/sda',
+                                 model='TinyUSB Drive',
+                                 size=3116853504,
+                                 rotational=False,
+                                 vendor='Super Vendor',
+                                 hctl='1:0:0:0'),
+            hardware.BlockDevice(name='/dev/sdc',
+                                 model='NWD-BLP4-1600',
+                                 size=107374182400,
+                                 rotational=False,
+                                 vendor='Super Vendor',
+                                 hctl='1:0:0:0'),
+            hardware.BlockDevice(name='/dev/sdb',
+                                 model='Fastable SD131 7',
+                                 size=107374182400,
+                                 rotational=False,
+                                 vendor='Super Vendor',
+                                 hctl='1:0:0:0'),
+        ]
+        self.assertRaises(errors.DeviceNotFound,
+                          utils.guess_root_disk,
+                          devices, 200 * units.Gi)
 
     def _get_journalctl_output(self, mock_execute, lines=None, units=None):
         contents = b'Krusty Krab'

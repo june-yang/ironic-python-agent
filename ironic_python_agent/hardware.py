@@ -24,6 +24,7 @@ from ironic_lib import utils as il_utils
 from oslo_concurrency import processutils
 from oslo_config import cfg
 from oslo_log import log
+from oslo_utils import units
 import pint
 import psutil
 import pyudev
@@ -174,6 +175,120 @@ def list_all_block_devices(block_type='disk'):
     return devices
 
 
+def list_part_block_devices(block_type='disk', tran_type='local'):
+    """List part physical block devices
+
+    The switches we use for lsblk: P for KEY="value" output, b for size output
+    in bytes, d to exclude dependent devices (like md or dm devices), i to
+    ensure ascii characters only, and o to specify the fields/columns we need.
+
+    Broken out as its own function to facilitate custom hardware managers that
+    don't need to subclass GenericHardwareManager.
+
+    :param block_type: Type of block device to find
+    :param tran_type: Type of block device transport type to find,
+                      the valid value: 'local', 'remote', 'iscsi', 'fc'
+    :return: A list of BlockDevices
+    """
+    _udev_settle()
+
+    mapping = {'local': ['TRAN="fc"', 'TRAN="iscsi"'],
+               'remote': ['TRAN="fc"', 'TRAN="iscsi"'],
+               'fc': ['TRAN="fc"'],
+               'iscsi': ['TRAN="iscsi"']}
+    valid_tran_type = ['local', 'remote', 'fc', 'iscsi']
+    columns = ['KNAME', 'MODEL', 'SIZE', 'ROTA', 'TYPE', 'TRAN']
+    report = utils.execute('lsblk', '-Pbdi', '-o{}'.format(','.join(columns)),
+                           check_exit_code=[0])[0]
+    lines = report.split('\n')
+    context = pyudev.Context()
+
+    if tran_type not in valid_tran_type:
+        LOG.warning("PASS the wrong TRAN TYPE, TRAN TYPE is %(tran)s, "
+                    "valid tran type is %(valid)s, set TRAN TYPE to 'local'",
+                    {'tran': tran_type, 'valid': valid_tran_type})
+        tran_type = 'local'
+
+    devices = []
+    for line in lines:
+        # Only handle matched tran_type line
+        if tran_type == 'local':
+            keywords = mapping['local']
+            is_ignore = False
+            for key in keywords:
+                # Found keys, F.g fc or iscsi
+                if line.find(key) != -1:
+                    # Not push the line into devices
+                    is_ignore = True
+                    break
+        else:
+            keywords = mapping[tran_type]
+            is_ignore = True
+            for key in keywords:
+                # Found keys, F.g fc or iscsi
+                if line.find(key) != -1:
+                    # We should save the line
+                    is_ignore = False
+                    break
+        if is_ignore:
+            continue
+
+        device = {}
+        # Split into KEY=VAL pairs
+        vals = shlex.split(line)
+        for key, val in (v.split('=', 1) for v in vals):
+            device[key] = val.strip()
+        # Ignore block types not specified
+        if device.get('TYPE') != block_type:
+            LOG.debug(
+                "TYPE did not match. Wanted: {!r} but found: {!r}".format(
+                    block_type, line))
+            continue
+
+        # Ensure all required columns are at least present, even if blank
+        missing = set(columns) - set(device)
+        if missing:
+            raise errors.BlockDeviceError(
+                '%s must be returned by lsblk.' % ', '.join(sorted(missing)))
+
+        name = '/dev/' + device['KNAME']
+        try:
+            udev = pyudev.Device.from_device_file(context, name)
+        # pyudev started raising another error in 0.18
+        except (ValueError, EnvironmentError, pyudev.DeviceNotFoundError) as e:
+            LOG.warning("Device %(dev)s is inaccessible, skipping... "
+                        "Error: %(error)s", {'dev': name, 'error': e})
+            extra = {}
+        else:
+            # TODO(lucasagomes): Since lsblk only supports
+            # returning the short serial we are using
+            # ID_SERIAL_SHORT here to keep compatibility with the
+            # bash deploy ramdisk
+            extra = {key: udev.get('ID_%s' % udev_key) for key, udev_key in
+                     [('wwn', 'WWN'), ('serial', 'SERIAL_SHORT'),
+                      ('wwn_with_extension', 'WWN_WITH_EXTENSION'),
+                      ('wwn_vendor_extension', 'WWN_VENDOR_EXTENSION')]}
+
+        # NOTE(lucasagomes): Newer versions of the lsblk tool supports
+        # HCTL as a parameter but let's get it from sysfs to avoid breaking
+        # old distros.
+        try:
+            extra['hctl'] = os.listdir(
+                '/sys/block/%s/device/scsi_device' % device['KNAME'])[0]
+        except (OSError, IndexError):
+            LOG.warning('Could not find the SCSI address (HCTL) for '
+                        'device %s. Skipping', name)
+
+        devices.append(BlockDevice(name=name,
+                                   model=device['MODEL'],
+                                   size=int(device['SIZE']),
+                                   rotational=bool(int(device['ROTA'])),
+                                   vendor=_get_device_info(device['KNAME'],
+                                                           'block', 'vendor'),
+                                   **extra))
+    return devices
+
+
 class HardwareSupport(object):
     """Example priorities for hardware managers.
 
@@ -218,10 +333,11 @@ class BlockDevice(encoding.SerializableComparable):
 class NetworkInterface(encoding.SerializableComparable):
     serializable_fields = ('name', 'mac_address', 'ipv4_address',
                            'has_carrier', 'lldp', 'vendor', 'product',
-                           'client_id')
+                           'client_id', 'speed', 'port', 'bus')
 
     def __init__(self, name, mac_addr, ipv4_address=None, has_carrier=True,
-                 lldp=None, vendor=None, product=None, client_id=None):
+                 lldp=None, vendor=None, product=None, speed=None, port=None,
+                 bus=None, client_id=None):
         self.name = name
         self.mac_address = mac_addr
         self.ipv4_address = ipv4_address
@@ -233,6 +349,10 @@ class NetworkInterface(encoding.SerializableComparable):
         # client identifier Option to allow DHCP to work over InfiniBand.
         # see https://tools.ietf.org/html/rfc4390
         self.client_id = client_id
+        # NOTE(yaojun), expand new fileds
+        self.speed = speed
+        self.port = port
+        self.bus = bus
 
 
 class CPU(encoding.SerializableComparable):
@@ -526,12 +646,44 @@ class GenericHardwareManager(HardwareManager):
         with open(addr_path) as addr_file:
             mac_addr = addr_file.read().strip()
 
+        # NOTE: Added by yaojun, to support get speed
+        speed_path = '{0}/class/net/{1}/speed'.format(self.sys_path,
+                                                      interface_name)
+        speed = '0'
+        # Note: wireless interface doesn't support read */speed file
+        # it reports 'Invalid argument' error
+        if interface_name != 'wlan0':
+            with open(speed_path) as speed_file:
+                speed = speed_file.read().strip()
+        try:
+            xport = utils.execute('/bin/tiny-ethtool', '--show-port',
+                                  interface_name)
+            port = xport[0].split('\n')[0]
+        except processutils.ProcessExecutionError as e:
+            error_msg = ('Unable to execute tiny-ethtool %(dev)s '
+                         'failed with %(err)s.' %
+                         {'dev': interface_name, 'err': e})
+            LOG.error(error_msg)
+            raise errors.CommandExecutionError(error_msg)
+
+        try:
+            xbus = utils.execute('/bin/tiny-ethtool', '--show-bus',
+                                 interface_name)
+            bus = xbus[0].split('\n')[0]
+        except processutils.ProcessExecutionError as e:
+            error_msg = ('Unable to execute tiny-ethtool %(dev)s '
+                         'failed with %(err)s.' %
+                         {'dev': interface_name, 'err': e})
+            LOG.error(error_msg)
+            raise errors.CommandExecutionError(error_msg)
+
         return NetworkInterface(
             interface_name, mac_addr,
             ipv4_address=self.get_ipv4_addr(interface_name),
             has_carrier=netutils.interface_has_carrier(interface_name),
             vendor=_get_device_info(interface_name, 'net', 'vendor'),
-            product=_get_device_info(interface_name, 'net', 'device'))
+            product=_get_device_info(interface_name, 'net', 'device'),
+            speed=speed, bus=bus, port=port)
 
     def get_ipv4_addr(self, interface_id):
         return netutils.get_ipv4_addr(interface_id)
@@ -636,16 +788,38 @@ class GenericHardwareManager(HardwareManager):
     def list_block_devices(self):
         return list_all_block_devices()
 
+    def list_part_block_devices(self, block_type="disk", tran_type="local"):
+        return list_part_block_devices(block_type, tran_type)
+
     def get_os_install_device(self):
         cached_node = get_cached_node()
         root_device_hints = None
+        tran_type = None
+        min_size = None
+
         if cached_node is not None:
             root_device_hints = cached_node['properties'].get('root_device')
+            tran_type = cached_node['properties'].get('root_device_type')
+            min_size = cached_node['properties'].get('root_device_min_size')
 
-        block_devices = self.list_block_devices()
         if not root_device_hints:
-            return utils.guess_root_disk(block_devices).name
+            if tran_type is None:
+                tran_type = 'local'
+            block_devices = \
+                self.list_part_block_devices(tran_type=tran_type)
+            if min_size is None:
+                min_size = 4
+            try:
+                min_size = int(min_size)
+            except ValueError:
+                LOG.warning('property/root_device_min_size should '
+                            'be number(int), but passed is %(size)s',
+                            {'size': min_size})
+                min_size = 4
+            return utils.guess_root_disk(block_devices,
+                                         min_size * units.Gi).name
         else:
+            block_devices = self.list_block_devices()
             serialized_devs = [dev.serialize() for dev in block_devices]
             try:
                 device = il_utils.match_root_device_hints(serialized_devs,

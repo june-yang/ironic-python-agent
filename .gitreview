@@ -1,5 +1,5 @@
 [gerrit]
-host=review.openstack.org
+host=gerrit.cmss.com
 port=29418
-project=openstack/ironic-python-agent.git
-defaultbranch=stable/ocata
+project=EC_Openstack/ironic-python-agent.git
+defaultbranch=dev/ocata
