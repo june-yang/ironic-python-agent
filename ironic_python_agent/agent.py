@@ -380,6 +380,8 @@ class IronicPythonAgent(base.ExecuteCommandMixin):
 
                 try:
                     result = hardware.dispatch_to_managers(step['step'], self.node, [])
+                    # steps like raid config need time for system aware disks
+                    time.sleep(cfg.CONF.init_clean_steps_interval)
                 except Exception as e:
                     msg = ('Error performing clean_step %(step)s: %(err)s' %
                            {'step': step['step'], 'err': e})
