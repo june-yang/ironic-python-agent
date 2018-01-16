@@ -203,7 +203,10 @@ cli_opts = [
                     'the server.'),
     cfg.StrOpt('init_clean_steps',
                default=APARAMS.get('init-clean-steps', None),
-               help='Steps to clean node after ramdisk and ipa load complete. ')
+               help='Steps to clean node after ramdisk and ipa load complete. '),
+    cfg.IntOpt('init_clean_steps_interval',
+               default=APARAMS.get('init-clean-steps', 5),
+               help='Clean step execute interval. ')
 ]
 
 CONF.register_cli_opts(cli_opts)
