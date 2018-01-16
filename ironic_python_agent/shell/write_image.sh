@@ -33,6 +33,23 @@ DEVICE="$2"
 [[ -f $IMAGEFILE ]] || usage "$IMAGEFILE (IMAGEFILE) is not a file"
 [[ -b $DEVICE ]] || usage "$DEVICE (DEVICE) is not a block device"
 
+# If system has lvm partitions, we should remove firstly
+command -v pvdisplay > /dev/null 2>&1
+if [ "$?" != "0" ];then
+    log "lvm2 is not installed in ramdisk, pvdisplay is not found"
+else
+    vg_names=`pvdisplay|grep -A 1 ${DEVICE}|grep "VG Name"|awk '{print $3}'`
+    if [ -z $vg_names ];then
+        log "There is no lvm volume in system"
+    else
+        log "The system contains lvm(VG): $vg_names"
+        for idx in $vg_names; do
+            log "running: vgremove -f $idx"
+            vgremove -f $idx
+        done
+    fi
+fi
+
 # In production this will be replaced with secure erasing the drives
 # For now we need to ensure there aren't any old (GPT) partitions on the drive
 log "Erasing existing GPT and MBR data structures from ${DEVICE}"
